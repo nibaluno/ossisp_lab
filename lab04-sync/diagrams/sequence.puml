@@ -1,0 +1,15 @@
+﻿@startuml
+participant Reader
+participant Writer
+participant Mutex
+participant readSem
+participant writeSem
+Writer -> Mutex : Lock (waitW++)
+Writer -> writeSem : Wait (wait for active readers)
+Reader -> Mutex : Lock (waitW>0)
+Reader -> readSem : Wait (new readers blocked)
+Reader -> Mutex : EndRead, activeR==0
+Reader -> writeSem : Release (wake waiting writer)
+Writer -> Mutex : EndWrite
+Writer -> readSem : Release(k) if no waiting writers
+@enduml
