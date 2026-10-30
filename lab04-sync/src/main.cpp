@@ -47,6 +47,64 @@ static void Log(Participant* p, const char* fmt, ...) {
     LeaveCriticalSection(&logCs);
 }
 
+static void Fatal(const char* msg) {
+    printf("FATAL: %s (GetLastError=%lu)\n", msg, (unsigned long)GetLastError());
+    ExitProcess(2);
+}
+
+static HANDLE hMutex, hReadSem, hWriteSem;
+static int activeR = 0, activeW = 0, waitR = 0, waitW = 0;
+
+static void Lock() {
+    if (WaitForSingleObject(hMutex, INFINITE) != WAIT_OBJECT_0) Fatal("Mutex wait failed");
+}
+static void Unlock() { if (!ReleaseMutex(hMutex)) Fatal("ReleaseMutex"); }
+static void WaitSem(HANDLE h) {
+    if (WaitForSingleObject(h, INFINITE) != WAIT_OBJECT_0) Fatal("Semaphore wait failed");
+}
+static void SignalSem(HANDLE h, LONG n) {
+    if (!ReleaseSemaphore(h, n, NULL)) Fatal("ReleaseSemaphore");
+}
+
+static void StartRead() {
+    Lock();
+    if (activeW > 0 || waitW > 0) { 
+        waitR++; Unlock();
+        WaitSem(hReadSem);
+    }
+    else { activeR++; Unlock(); }
+}
+
+static void EndRead() {
+    Lock();
+    activeR--;
+    if (activeR == 0 && waitW > 0) { 
+        waitW--; activeW = 1; SignalSem(hWriteSem, 1);
+    }
+    Unlock();
+}
+
+static void StartWrite() {
+    Lock();
+    if (activeR > 0 || activeW > 0) {
+        waitW++; Unlock();
+        WaitSem(hWriteSem);
+    }
+    else { activeW = 1; Unlock(); }
+}
+
+static void EndWrite() {
+    Lock();
+    activeW = 0;
+    if (waitW > 0) { 
+        waitW--; activeW = 1; SignalSem(hWriteSem, 1);
+    }
+    else if (waitR > 0) { 
+        int k = waitR; activeR += k; waitR = 0; SignalSem(hReadSem, k);
+    }
+    Unlock();
+}
+
 static HANDLE hStart;
 
 static DWORD WINAPI Worker(LPVOID arg) {
@@ -61,8 +119,7 @@ static DWORD WINAPI Worker(LPVOID arg) {
 
         Log(p, "STATE=WAITING op=%d", i + 1);
 
- 
-
+        if (p->role == READER) StartRead(); else StartWrite();
         if (p->role == READER) {
             Log(p, "STATE=READING");
             Sleep(cfg.readMs);
@@ -72,7 +129,7 @@ static DWORD WINAPI Worker(LPVOID arg) {
             Sleep(cfg.writeMs);
         }
 
-
+        if (p->role == READER) EndRead(); else EndWrite();
     }
     Log(p, "STATE=FINISHED");
     return 0;
@@ -84,7 +141,12 @@ int main(int argc, char** argv) {
     QueryPerformanceCounter(&qpcStart);
     InitializeCriticalSection(&logCs);
 
+
+    hMutex = CreateMutex(NULL, FALSE, NULL);
+    hReadSem = CreateSemaphore(NULL, 0, 64, NULL);
+    hWriteSem = CreateSemaphore(NULL, 0, 64, NULL);
     hStart = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!hMutex  !hReadSem  !hWriteSem || !hStart) Fatal("Create sync objects");
 
     int n = cfg.readers + cfg.writers;
     static Participant parts[64];
@@ -106,8 +168,9 @@ int main(int argc, char** argv) {
     WaitForMultipleObjects(n, th, TRUE, INFINITE);
 
     for (int i = 0; i < n; i++) CloseHandle(th[i]);
-    CloseHandle(hStart);
+    CloseHandle(hMutex); CloseHandle(hReadSem); CloseHandle(hWriteSem); CloseHandle(hStart);
     DeleteCriticalSection(&logCs);
 
+    printf("All threads finished successfully (Stage 3).\n");
     return 0;
 }
